@@ -5,6 +5,10 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import log_loss
 
+from sklearn.model_selection import StratifiedShuffleSplit
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, log_loss
+
 PATH = "whl_2025_ordered.csv"
 TEST_SIZE = 0.20
 SEED = 42
@@ -110,3 +114,87 @@ print("TEST LogLoss:", round(ll, 4))
 
 coef = pd.Series(clf.coef_[0], index=X.columns)
 print("\nEstimated home advantage (log-odds):", round(float(coef["home_adv"]), 4))
+
+
+sss = StratifiedShuffleSplit(n_splits=50, test_size=0.20, random_state=42)
+
+accs = []
+lls = []
+
+for train_idx, test_idx in sss.split(X, y):
+    X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+    y_tr, y_te = y[train_idx], y[test_idx]
+
+    clf = LogisticRegression(
+        penalty="l2",
+        C=1.0,
+        solver="lbfgs",
+        max_iter=5000
+    )
+
+    clf.fit(X_tr, y_tr)
+
+    probs = clf.predict_proba(X_te)[:, 1]
+    preds = (probs >= 0.5).astype(int)
+
+    accs.append(accuracy_score(y_te, preds))
+    lls.append(log_loss(y_te, probs))
+
+accs = np.array(accs)
+lls = np.array(lls)
+
+print("\nRepeated 50-split Results")
+print("Accuracy Mean:", round(accs.mean(), 4))
+print("Accuracy Std:", round(accs.std(), 4))
+print("LogLoss Mean:", round(lls.mean(), 4))
+print("LogLoss Std:", round(lls.std(), 4))
+
+# -----------------------------
+# 7) POWER RANKINGS (team-only Bradley–Terry ratings)
+#    Fit on ALL games (rankings should not depend on a particular test split)
+# -----------------------------
+from scipy.special import expit
+
+clf_all = LogisticRegression(
+    penalty="l2",
+    C=L2_C,
+    solver="lbfgs",
+    max_iter=MAX_ITER
+)
+clf_all.fit(X, y)
+
+coef_all = pd.Series(clf_all.coef_[0], index=X.columns)
+
+# extract team coefficients (reference team is the dropped dummy -> implicit 0)
+team_cols = [c for c in X.columns if c.startswith("team_")]
+team_strength = coef_all[team_cols].copy()
+team_strength.index = team_strength.index.str.replace("^team_", "", regex=True)
+
+# add missing reference team with 0.0 so every team appears
+all_teams = sorted(set(g["home_team"].astype(str)).union(set(g["away_team"].astype(str))))
+missing = [t for t in all_teams if t not in team_strength.index]
+for t in missing:
+    team_strength.loc[t] = 0.0
+
+team_strength = team_strength.sort_values(ascending=False)
+
+# interpretable probability vs "average team" on neutral ice
+avg = team_strength.mean()
+p_vs_avg = expit(team_strength - avg)
+
+power = pd.DataFrame({
+    "rank": np.arange(1, len(team_strength) + 1),
+    "team": team_strength.index,
+    "bt_strength_logodds": team_strength.values,
+    "p_win_vs_avg_neutral": p_vs_avg.values
+})
+
+# clean formatting
+power["bt_strength_logodds"] = power["bt_strength_logodds"].round(4)
+power["p_win_vs_avg_neutral"] = power["p_win_vs_avg_neutral"].round(4)
+
+print("\nTEAM POWER RANKINGS (team-only BT rating; fitted on ALL games):")
+print(power.to_string(index=False))
+
+# optional: save
+# power.to_csv("bt_team_power_rankings.csv", index=False)
